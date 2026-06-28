@@ -8,7 +8,6 @@ import requests
 import json
 from dotenv import load_dotenv
 
-MAX_GBP_TOTAL = 20.0
 MAX_GBP_PER_TRADE = 5.0
 PROFIT_TARGET = 0.1
 STOP_LOSS = 0.5
@@ -22,13 +21,11 @@ API_KEY = os.getenv("KRAKEN_API_KEY", "")
 API_SECRET = os.getenv("KRAKEN_API_SECRET", "")
 
 TRADE_PAIRS = [
-    "ZGBPZUSD",
-    "ZEURZUSD",
-    "EURGBP",
-    "USDCGBP"
+    "XBTGBP",
+    "XETHGBP",
+    "SOLGBP",
+    "XDGGBP"
 ]
-
-reference_prices = {pair: None for pair in TRADE_PAIRS}
 
 def save_positions(positions):
     with open(POSITIONS_FILE, "w") as f:
@@ -77,28 +74,40 @@ def get_price(pair):
     except:
         return None
 
+def get_min_volume(pair):
+    mins = {
+        "XBTGBP": 0.0001,
+        "XETHGBP": 0.01,
+        "SOLGBP": 0.5,
+        "XDGGBP": 50.0
+    }
+    return mins.get(pair, 1.0)
+
 def place_order(side, pair, volume):
-    print(f"ORDER: {side.upper()} {volume:.4f} {pair}")
+    min_vol = get_min_volume(pair)
+    if volume < min_vol:
+        volume = min_vol
+    print(f"ORDER: {side.upper()} {volume:.6f} {pair}")
     data = {
         "pair": pair,
         "type": side,
         "ordertype": "market",
-        "volume": f"{volume:.8f}"
+        "volume": f"{volume:.6f}"
     }
     return private_request("/0/private/AddOrder", data)
 
 def main():
     print("="*60)
-    print("BOT RUNNING")
+    print("CRYPTO BOT RUNNING")
     print(f"Profit target: {PROFIT_TARGET}% | Stop loss: {STOP_LOSS}%")
-    print(f"Per trade: {MAX_GBP_PER_TRADE} | Interval: {CHECK_INTERVAL}s")
+    print(f"Per trade: GBP{MAX_GBP_PER_TRADE} | Interval: {CHECK_INTERVAL}s")
     print("="*60)
 
     try:
         bal = private_request("/0/private/Balance")
         if "result" in bal:
             gbp_bal = float(bal["result"].get("ZGBP", 0))
-            print(f"Balance: {gbp_bal:.2f}")
+            print(f"Balance: GBP{gbp_bal:.2f}")
     except:
         print("Balance check skipped")
 
@@ -109,47 +118,41 @@ def main():
             time.sleep(2)
             continue
 
-        if reference_prices[pair] is None:
-            reference_prices[pair] = price
-            print(f"Reference price set for {pair}: {price:.4f}")
-            time.sleep(2)
-            continue
-
-        ref = reference_prices[pair]
-        buy_trigger = ref * (1 - PROFIT_TARGET / 100)
-        sell_trigger = ref * (1 + PROFIT_TARGET / 100)
-        print(f"{pair}: {price:.4f} | BUY < {buy_trigger:.4f} | SELL > {sell_trigger:.4f}")
+        print(f"{pair}: GBP{price:.4f}")
 
         if current_position[pair] is None:
-            if price <= buy_trigger:
-                volume = MAX_GBP_PER_TRADE / price
-                res = place_order("buy", pair, volume)
-                if not res.get("error"):
-                    current_position[pair] = price
-                    save_positions(current_position)
-                    print(f"OPENED {pair} at {price:.4f}")
+            volume = MAX_GBP_PER_TRADE / price
+            min_vol = get_min_volume(pair)
+            if volume < min_vol:
+                volume = min_vol
+            res = place_order("buy", pair, volume)
+            if not res.get("error"):
+                current_position[pair] = {"price": price, "volume": volume}
+                save_positions(current_position)
+                print(f"BOUGHT {pair} at GBP{price:.4f} vol:{volume:.6f}")
+
         else:
-            entry = current_position[pair]
+            entry = current_position[pair]["price"]
+            volume = current_position[pair]["volume"]
             take_profit = entry * (1 + PROFIT_TARGET / 100)
             stop_loss = entry * (1 - STOP_LOSS / 100)
+            print(f"{pair} | entry:GBP{entry:.4f} | TP:GBP{take_profit:.4f} | SL:GBP{stop_loss:.4f} | now:GBP{price:.4f}")
 
             if price >= take_profit:
-                volume = MAX_GBP_PER_TRADE / entry
                 res = place_order("sell", pair, volume)
                 if not res.get("error"):
                     profit = (price - entry) / entry * MAX_GBP_PER_TRADE
                     current_position[pair] = None
                     save_positions(current_position)
-                    print(f"CLOSED {pair} PROFIT: {profit:.2f}")
+                    print(f"PROFIT TAKEN: {pair} +GBP{profit:.4f}")
 
             elif price <= stop_loss:
-                volume = MAX_GBP_PER_TRADE / entry
                 res = place_order("sell", pair, volume)
                 if not res.get("error"):
                     loss = (entry - price) / entry * MAX_GBP_PER_TRADE
                     current_position[pair] = None
                     save_positions(current_position)
-                    print(f"STOP LOSS HIT: {pair} LOSS: {loss:.2f}")
+                    print(f"STOP LOSS: {pair} -GBP{loss:.4f}")
 
         time.sleep(2)
 
