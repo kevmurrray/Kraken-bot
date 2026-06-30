@@ -12,6 +12,7 @@ MAX_GBP_PER_TRADE = 5.0
 PROFIT_TARGET = 0.1
 STOP_LOSS = 0.5
 CHECK_INTERVAL = 30
+PAPER_TRADING = True
 
 API_URL = "https://api.kraken.com"
 POSITIONS_FILE = os.path.expanduser("~/positions.json")
@@ -22,7 +23,6 @@ API_SECRET = os.getenv("KRAKEN_API_SECRET", "")
 
 TRADE_PAIRS = [
     "XBTGBP",
-    "XETHGBP",
     "SOLGBP",
     "XDGGBP"
 ]
@@ -38,6 +38,9 @@ def load_positions():
     return {pair: None for pair in TRADE_PAIRS}
 
 current_position = load_positions()
+for pair in TRADE_PAIRS:
+    if pair not in current_position:
+        current_position[pair] = None
 
 def kraken_sign(path, data, secret):
     postdata = urllib.parse.urlencode(data)
@@ -77,7 +80,6 @@ def get_price(pair):
 def get_min_volume(pair):
     mins = {
         "XBTGBP": 0.0001,
-        "XETHGBP": 0.01,
         "SOLGBP": 0.5,
         "XDGGBP": 50.0
     }
@@ -87,6 +89,11 @@ def place_order(side, pair, volume):
     min_vol = get_min_volume(pair)
     if volume < min_vol:
         volume = min_vol
+
+    if PAPER_TRADING:
+        print(f"[PAPER] Would {side.upper()} {volume:.6f} {pair} -- no real order placed")
+        return {}
+
     print(f"ORDER: {side.upper()} {volume:.6f} {pair}")
     data = {
         "pair": pair,
@@ -98,7 +105,8 @@ def place_order(side, pair, volume):
 
 def main():
     print("="*60)
-    print("CRYPTO BOT RUNNING")
+    mode = "PAPER TRADING (no real money)" if PAPER_TRADING else "LIVE TRADING"
+    print(f"CRYPTO BOT RUNNING -- {mode}")
     print(f"Profit target: {PROFIT_TARGET}% | Stop loss: {STOP_LOSS}%")
     print(f"Per trade: GBP{MAX_GBP_PER_TRADE} | Interval: {CHECK_INTERVAL}s")
     print("="*60)
@@ -107,7 +115,7 @@ def main():
         bal = private_request("/0/private/Balance")
         if "result" in bal:
             gbp_bal = float(bal["result"].get("ZGBP", 0))
-            print(f"Balance: GBP{gbp_bal:.2f}")
+            print(f"Real GBP cash balance: GBP{gbp_bal:.2f}")
     except:
         print("Balance check skipped")
 
@@ -126,10 +134,10 @@ def main():
             if volume < min_vol:
                 volume = min_vol
             res = place_order("buy", pair, volume)
-            if not res.get("error"):
+            if PAPER_TRADING or not res.get("error"):
                 current_position[pair] = {"price": price, "volume": volume}
                 save_positions(current_position)
-                print(f"BOUGHT {pair} at GBP{price:.4f} vol:{volume:.6f}")
+                print(f"OPENED (paper) {pair} at GBP{price:.4f} vol:{volume:.6f}")
 
         else:
             entry = current_position[pair]["price"]
@@ -140,19 +148,19 @@ def main():
 
             if price >= take_profit:
                 res = place_order("sell", pair, volume)
-                if not res.get("error"):
+                if PAPER_TRADING or not res.get("error"):
                     profit = (price - entry) / entry * MAX_GBP_PER_TRADE
                     current_position[pair] = None
                     save_positions(current_position)
-                    print(f"PROFIT TAKEN: {pair} +GBP{profit:.4f}")
+                    print(f"PROFIT TAKEN (paper): {pair} +GBP{profit:.4f}")
 
             elif price <= stop_loss:
                 res = place_order("sell", pair, volume)
-                if not res.get("error"):
+                if PAPER_TRADING or not res.get("error"):
                     loss = (entry - price) / entry * MAX_GBP_PER_TRADE
                     current_position[pair] = None
                     save_positions(current_position)
-                    print(f"STOP LOSS: {pair} -GBP{loss:.4f}")
+                    print(f"STOP LOSS (paper): {pair} -GBP{loss:.4f}")
 
         time.sleep(2)
 
