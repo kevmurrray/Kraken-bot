@@ -1,170 +1,101 @@
-import os
-import time
-import hmac
-import hashlib
-import base64
-import urllib.parse
-import requests
-import json
-from dotenv import load_dotenv
+from pandas import DataFrame
+import talib.abstract as ta
+from freqtrade.strategy import IStrategy, DecimalParameter, IntParameter
+from technical import qtpylib
 
-MAX_GBP_PER_TRADE = 5.0
-PROFIT_TARGET = 0.1
-STOP_LOSS = 0.5
-CHECK_INTERVAL = 30
-PAPER_TRADING = True
+class TrendStrategy(IStrategy):
+    """
+    Trend following strategy using EMA crossover + RSI filter.
+    Only trades when market is in a clear uptrend.
+    Sits in cash during downtrends.
+    """
+    INTERFACE_VERSION = 3
+    timeframe = "1h"
+    can_short = False
 
-API_URL = "https://api.kraken.com"
-POSITIONS_FILE = os.path.expanduser("~/positions.json")
-
-load_dotenv(os.path.expanduser("~/.env"))
-API_KEY = os.getenv("KRAKEN_API_KEY", "")
-API_SECRET = os.getenv("KRAKEN_API_SECRET", "")
-
-TRADE_PAIRS = [
-    "XBTGBP",
-    "SOLGBP",
-    "XDGGBP"
-]
-
-def save_positions(positions):
-    with open(POSITIONS_FILE, "w") as f:
-        json.dump(positions, f)
-
-def load_positions():
-    if os.path.exists(POSITIONS_FILE):
-        with open(POSITIONS_FILE, "r") as f:
-            return json.load(f)
-    return {pair: None for pair in TRADE_PAIRS}
-
-current_position = load_positions()
-for pair in TRADE_PAIRS:
-    if pair not in current_position:
-        current_position[pair] = None
-
-def kraken_sign(path, data, secret):
-    postdata = urllib.parse.urlencode(data)
-    encoded = (str(data["nonce"]) + postdata).encode()
-    message = path.encode() + hashlib.sha256(encoded).digest()
-    mac = hmac.new(base64.b64decode(secret), message, hashlib.sha512)
-    return base64.b64encode(mac.digest()).decode()
-
-def private_request(path, data=None):
-    data = data or {}
-    if not API_KEY or not API_SECRET:
-        raise RuntimeError("Missing API keys in .env file")
-    data["nonce"] = int(time.time() * 1000)
-    headers = {
-        "API-Key": API_KEY,
-        "API-Sign": kraken_sign(path, data, API_SECRET)
+    # Take profit tiers
+    minimal_roi = {
+        "0": 0.08,
+        "120": 0.04,
+        "240": 0.02,
+        "480": 0.01
     }
-    try:
-        resp = requests.post(API_URL + path, data=data, headers=headers, timeout=30).json()
-        if resp.get("error"):
-            print(f"API ERROR: {resp['error']}")
-        return resp
-    except Exception as e:
-        print(f"CONNECTION ERROR: {e}")
-        return {}
 
-def get_price(pair):
-    try:
-        r = requests.get(f"{API_URL}/0/public/Ticker", params={"pair": pair}, timeout=10).json()
-        if "result" in r:
-            key = next(iter(r["result"]))
-            return float(r["result"][key]["c"][0])
-        return None
-    except:
-        return None
+    stoploss = -0.08
+    trailing_stop = True
+    trailing_stop_positive = 0.02
+    trailing_stop_positive_offset = 0.04
+    trailing_only_offset_is_reached = True
 
-def get_min_volume(pair):
-    mins = {
-        "XBTGBP": 0.0001,
-        "SOLGBP": 0.5,
-        "XDGGBP": 50.0
+    process_only_new_candles = True
+    use_exit_signal = True
+    exit_profit_only = False
+    startup_candle_count = 50
+
+    # Hyperoptable parameters
+    buy_ema_short = IntParameter(5, 20, default=9, space="buy")
+    buy_ema_long = IntParameter(21, 100, default=50, space="buy")
+    buy_rsi_min = IntParameter(30, 60, default=50, space="buy")
+
+    order_types = {
+        "entry": "limit",
+        "exit": "limit",
+        "stoploss": "market",
+        "stoploss_on_exchange": False
     }
-    return mins.get(pair, 1.0)
 
-def place_order(side, pair, volume):
-    min_vol = get_min_volume(pair)
-    if volume < min_vol:
-        volume = min_vol
-
-    if PAPER_TRADING:
-        print(f"[PAPER] Would {side.upper()} {volume:.6f} {pair} -- no real order placed")
-        return {}
-
-    print(f"ORDER: {side.upper()} {volume:.6f} {pair}")
-    data = {
-        "pair": pair,
-        "type": side,
-        "ordertype": "market",
-        "volume": f"{volume:.6f}"
+    order_time_in_force = {
+        "entry": "GTC",
+        "exit": "GTC"
     }
-    return private_request("/0/private/AddOrder", data)
 
-def main():
-    print("="*60)
-    mode = "PAPER TRADING (no real money)" if PAPER_TRADING else "LIVE TRADING"
-    print(f"CRYPTO BOT RUNNING -- {mode}")
-    print(f"Profit target: {PROFIT_TARGET}% | Stop loss: {STOP_LOSS}%")
-    print(f"Per trade: GBP{MAX_GBP_PER_TRADE} | Interval: {CHECK_INTERVAL}s")
-    print("="*60)
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # EMAs
+        for val in self.buy_ema_short.range:
+            dataframe[f"ema_{val}"] = ta.EMA(dataframe, timeperiod=val)
+        for val in self.buy_ema_long.range:
+            dataframe[f"ema_{val}"] = ta.EMA(dataframe, timeperiod=val)
 
-    try:
-        bal = private_request("/0/private/Balance")
-        if "result" in bal:
-            gbp_bal = float(bal["result"].get("ZGBP", 0))
-            print(f"Real GBP cash balance: GBP{gbp_bal:.2f}")
-    except:
-        print("Balance check skipped")
+        # RSI
+        dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
 
-    for pair in TRADE_PAIRS:
-        price = get_price(pair)
-        if not price:
-            print(f"Could not get price for {pair}, skipping")
-            time.sleep(2)
-            continue
+        # Volume check
+        dataframe["volume_mean"] = dataframe["volume"].rolling(20).mean()
 
-        print(f"{pair}: GBP{price:.4f}")
+        # MACD for trend confirmation
+        macd = ta.MACD(dataframe)
+        dataframe["macd"] = macd["macd"]
+        dataframe["macdsignal"] = macd["macdsignal"]
 
-        if current_position[pair] is None:
-            volume = MAX_GBP_PER_TRADE / price
-            min_vol = get_min_volume(pair)
-            if volume < min_vol:
-                volume = min_vol
-            res = place_order("buy", pair, volume)
-            if PAPER_TRADING or not res.get("error"):
-                current_position[pair] = {"price": price, "volume": volume}
-                save_positions(current_position)
-                print(f"OPENED (paper) {pair} at GBP{price:.4f} vol:{volume:.6f}")
+        return dataframe
 
-        else:
-            entry = current_position[pair]["price"]
-            volume = current_position[pair]["volume"]
-            take_profit = entry * (1 + PROFIT_TARGET / 100)
-            stop_loss = entry * (1 - STOP_LOSS / 100)
-            print(f"{pair} | entry:GBP{entry:.4f} | TP:GBP{take_profit:.4f} | SL:GBP{stop_loss:.4f} | now:GBP{price:.4f}")
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                # Short EMA above long EMA = uptrend
+                (dataframe[f"ema_{self.buy_ema_short.value}"] > dataframe[f"ema_{self.buy_ema_long.value}"]) &
+                # EMA crossover happening now
+                (qtpylib.crossed_above(dataframe[f"ema_{self.buy_ema_short.value}"], dataframe[f"ema_{self.buy_ema_long.value}"])) &
+                # RSI showing momentum but not overbought
+                (dataframe["rsi"] > self.buy_rsi_min.value) &
+                (dataframe["rsi"] < 75) &
+                # MACD positive
+                (dataframe["macd"] > dataframe["macdsignal"]) &
+                # Volume above average
+                (dataframe["volume"] > dataframe["volume_mean"]) &
+                (dataframe["volume"] > 0)
+            ),
+            "enter_long"
+        ] = 1
+        return dataframe
 
-            if price >= take_profit:
-                res = place_order("sell", pair, volume)
-                if PAPER_TRADING or not res.get("error"):
-                    profit = (price - entry) / entry * MAX_GBP_PER_TRADE
-                    current_position[pair] = None
-                    save_positions(current_position)
-                    print(f"PROFIT TAKEN (paper): {pair} +GBP{profit:.4f}")
-
-            elif price <= stop_loss:
-                res = place_order("sell", pair, volume)
-                if PAPER_TRADING or not res.get("error"):
-                    loss = (entry - price) / entry * MAX_GBP_PER_TRADE
-                    current_position[pair] = None
-                    save_positions(current_position)
-                    print(f"STOP LOSS (paper): {pair} -GBP{loss:.4f}")
-
-        time.sleep(2)
-
-if __name__ == "__main__":
-    while True:
-        main()
-        time.sleep(CHECK_INTERVAL)
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                # Short EMA crosses below long EMA = downtrend starting
+                (qtpylib.crossed_below(dataframe[f"ema_{self.buy_ema_short.value}"], dataframe[f"ema_{self.buy_ema_long.value}"])) &
+                (dataframe["volume"] > 0)
+            ),
+            "exit_long"
+        ] = 1
+        return dataframe
