@@ -13,7 +13,6 @@ class TrendStrategy(IStrategy):
     timeframe = "1h"
     can_short = False
 
-    # Take profit tiers
     minimal_roi = {
         "0": 0.08,
         "120": 0.04,
@@ -28,11 +27,10 @@ class TrendStrategy(IStrategy):
     trailing_only_offset_is_reached = True
 
     process_only_new_candles = True
-    use_exit_signal = True
+    use_exit_signal = False
     exit_profit_only = False
     startup_candle_count = 50
 
-    # Hyperoptable parameters
     buy_ema_short = IntParameter(5, 20, default=9, space="buy")
     buy_ema_long = IntParameter(21, 100, default=50, space="buy")
     buy_rsi_min = IntParameter(30, 60, default=50, space="buy")
@@ -50,26 +48,35 @@ class TrendStrategy(IStrategy):
     }
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # EMAs
         for val in self.buy_ema_short.range:
             dataframe[f"ema_{val}"] = ta.EMA(dataframe, timeperiod=val)
         for val in self.buy_ema_long.range:
             dataframe[f"ema_{val}"] = ta.EMA(dataframe, timeperiod=val)
 
-        # RSI
         dataframe["rsi"] = ta.RSI(dataframe, timeperiod=14)
-
-        # Volume check
         dataframe["volume_mean"] = dataframe["volume"].rolling(20).mean()
 
-        # MACD for trend confirmation
         macd = ta.MACD(dataframe)
         dataframe["macd"] = macd["macd"]
         dataframe["macdsignal"] = macd["macdsignal"]
 
         return dataframe
 
-def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Let ROI and trailing stop handle exits
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                (dataframe[f"ema_{self.buy_ema_short.value}"] > dataframe[f"ema_{self.buy_ema_long.value}"]) &
+                (qtpylib.crossed_above(dataframe[f"ema_{self.buy_ema_short.value}"], dataframe[f"ema_{self.buy_ema_long.value}"])) &
+                (dataframe["rsi"] > self.buy_rsi_min.value) &
+                (dataframe["rsi"] < 75) &
+                (dataframe["macd"] > dataframe["macdsignal"]) &
+                (dataframe["volume"] > dataframe["volume_mean"]) &
+                (dataframe["volume"] > 0)
+            ),
+            "enter_long"
+        ] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe.loc[:, "exit_long"] = 0
         return dataframe
