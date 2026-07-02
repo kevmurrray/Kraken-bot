@@ -69,33 +69,7 @@ class TrendStrategy(IStrategy):
 
         return dataframe
 
-    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            (
-                # Short EMA above long EMA = uptrend
-                (dataframe[f"ema_{self.buy_ema_short.value}"] > dataframe[f"ema_{self.buy_ema_long.value}"]) &
-                # EMA crossover happening now
-                (qtpylib.crossed_above(dataframe[f"ema_{self.buy_ema_short.value}"], dataframe[f"ema_{self.buy_ema_long.value}"])) &
-                # RSI showing momentum but not overbought
-                (dataframe["rsi"] > self.buy_rsi_min.value) &
-                (dataframe["rsi"] < 75) &
-                # MACD positive
-                (dataframe["macd"] > dataframe["macdsignal"]) &
-                # Volume above average
-                (dataframe["volume"] > dataframe["volume_mean"]) &
-                (dataframe["volume"] > 0)
-            ),
-            "enter_long"
-        ] = 1
-        return dataframe
-
-    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe.loc[
-            (
-                # Short EMA crosses below long EMA = downtrend starting
-                (qtpylib.crossed_below(dataframe[f"ema_{self.buy_ema_short.value}"], dataframe[f"ema_{self.buy_ema_long.value}"])) &
-                (dataframe["volume"] > 0)
-            ),
-            "exit_long"
-        ] = 1
+def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # Let ROI and trailing stop handle exits
+        dataframe.loc[:, "exit_long"] = 0
         return dataframe
